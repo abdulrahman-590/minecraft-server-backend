@@ -1,5 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+import jwt
+from datetime import datetime, timedelta
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -26,6 +29,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/status")
+def status():
+    return {"message": "server is running"}
+
+PORTAL_PASSWORD = os.getenv('PORTAL_PASSWORD')
+JWT_SECRET = os.getenv('JWT_SECRET', 'fallback-secret')
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+api_router = APIRouter(dependencies=[Depends(verify_token)])
+
+class LoginRequest(BaseModel):
+    password: str
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    if not PORTAL_PASSWORD:
+        raise HTTPException(status_code=500, detail="Server misconfiguration")
+    if req.password != PORTAL_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    token = jwt.encode(
+        {"auth": True, "exp": datetime.utcnow() + timedelta(days=7)},
+        JWT_SECRET,
+        algorithm="HS256"
+    )
+    return {"token": token}
 
 # Setup AWS EC2 client
 ec2_client = boto3.client(
@@ -57,7 +96,7 @@ def run_rcon_command(command: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"RCON connection failed: {str(e)}")
 
-@app.get("/api/server/status")
+@api_router.get("/api/server/status")
 def get_server_status():
     if not INSTANCE_ID or INSTANCE_ID == "i-xxxxxxxxxxxxxxxxx":
         return {"status": "running", "ip": "127.0.0.1", "instance_type": "t3.medium"}
@@ -77,7 +116,7 @@ def get_server_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/server/start")
+@api_router.post("/api/server/start")
 def start_server():
     if not INSTANCE_ID or INSTANCE_ID == "i-xxxxxxxxxxxxxxxxx":
         return {"message": "Mock start command issued."}
@@ -87,7 +126,7 @@ def start_server():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/server/stop")
+@api_router.post("/api/server/stop")
 def stop_server():
     if not INSTANCE_ID or INSTANCE_ID == "i-xxxxxxxxxxxxxxxxx":
         return {"message": "Mock stop command issued."}
@@ -97,7 +136,7 @@ def stop_server():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/server/reboot")
+@api_router.post("/api/server/reboot")
 def reboot_server():
     if not INSTANCE_ID or INSTANCE_ID == "i-xxxxxxxxxxxxxxxxx":
         return {"message": "Mock reboot command issued."}
@@ -107,7 +146,7 @@ def reboot_server():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/minecraft/whitelist")
+@api_router.get("/api/minecraft/whitelist")
 def get_whitelist():
     # RCON whitelist list command outputs "There are X whitelisted player(s): player1, player2"
     response = run_rcon_command("whitelist list")
@@ -118,17 +157,17 @@ def get_whitelist():
             return {"players": players}
     return {"players": []}
 
-@app.post("/api/minecraft/whitelist")
+@api_router.post("/api/minecraft/whitelist")
 def add_whitelist(action: PlayerAction):
     response = run_rcon_command(f"whitelist add {action.username}")
     return {"message": response}
 
-@app.delete("/api/minecraft/whitelist")
+@api_router.delete("/api/minecraft/whitelist")
 def remove_whitelist(action: PlayerAction):
     response = run_rcon_command(f"whitelist remove {action.username}")
     return {"message": response}
 
-@app.get("/api/minecraft/players")
+@api_router.get("/api/minecraft/players")
 def get_online_players():
     # RCON list command outputs "There are X of a max of Y players online: player1, player2"
     response = run_rcon_command("list")
@@ -142,14 +181,14 @@ def get_online_players():
 class RconCommand(BaseModel):
     command: str
 
-@app.post("/api/minecraft/command")
+@api_router.post("/api/minecraft/command")
 def execute_rcon_command(req: RconCommand):
     response = run_rcon_command(req.command)
     return {"response": response}
 
 CURRENT_WEATHER = "Clear"
 
-@app.get("/api/minecraft/world/state")
+@api_router.get("/api/minecraft/world/state")
 def get_world_state():
     global CURRENT_WEATHER
     time_str = "Day"
@@ -171,12 +210,12 @@ def get_world_state():
 class WorldAction(BaseModel):
     action: str
 
-@app.post("/api/minecraft/time")
+@api_router.post("/api/minecraft/time")
 def set_time(req: WorldAction):
     response = run_rcon_command(f"time set {req.action}")
     return {"message": response}
 
-@app.post("/api/minecraft/weather")
+@api_router.post("/api/minecraft/weather")
 def set_weather(req: WorldAction):
     global CURRENT_WEATHER
     response = run_rcon_command(f"weather {req.action}")
@@ -187,12 +226,12 @@ class GameModeAction(BaseModel):
     mode: str
     username: str
 
-@app.post("/api/minecraft/gamemode")
+@api_router.post("/api/minecraft/gamemode")
 def set_gamemode(req: GameModeAction):
     response = run_rcon_command(f"gamemode {req.mode} {req.username}")
     return {"message": response}
 
-@app.get("/api/server/metrics")
+@api_router.get("/api/server/metrics")
 def get_metrics():
     import random
     
@@ -214,7 +253,7 @@ def get_metrics():
         "tps": jittered_tps
     }
 
-@app.get("/api/minecraft/backup")
+@api_router.get("/api/minecraft/backup")
 def download_backup():
     # Create an in-memory zip file for prototyping
     zip_buffer = io.BytesIO()
@@ -231,6 +270,8 @@ def download_backup():
         'Content-Disposition': 'attachment; filename="minecraft_world_backup.zip"'
     }
     return StreamingResponse(zip_buffer, media_type="application/x-zip-compressed", headers=headers)
+
+app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn

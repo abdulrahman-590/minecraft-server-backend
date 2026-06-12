@@ -4,3 +4,4 @@ pydantic
 python-dotenv
 boto3
 mcrcon
+pyjwt
